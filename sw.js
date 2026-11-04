@@ -1,5 +1,5 @@
 /* keeps the app shell on the phone so the icon opens instantly; the system itself always comes live from Google */
-var CACHE = "shell-v5";
+var CACHE = "shell-v7";
 var SHELL = ["./", "index.html", "manifest.webmanifest", "icon-192.png", "icon-512.png", "maskable-512.png", "apple-touch-icon.png", "favicon-32.png"];
 self.addEventListener("install", function (e) {
   e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(SHELL); }).then(function () { return self.skipWaiting(); }));

@@ -45,8 +45,24 @@ const SENT = 'سجل إشعارات العجز';
 let BR = '';
 function brCode_(id) { return 'ف' + String(id).replace(/^f/, ''); }
 function bname_(name) { if (!BR || name === USERS || name === LOGO || name === WMS) return name; return name + ' - ' + brCode_(BR); }
+/* the data spreadsheet: the one this project lives in, or - when the system is hosted in another account -
+   the client's spreadsheet named by the script property SHEET_ID (its id, or its whole link) */
+let BOOK_ = null;
+function book_() {
+  if (BOOK_) return BOOK_;
+  const raw = String(PropertiesService.getScriptProperties().getProperty('SHEET_ID') || '').trim();
+  if (raw) {
+    const m = raw.match(/\/d\/([A-Za-z0-9_-]{20,})/), id = m ? m[1] : raw;
+    try { BOOK_ = SpreadsheetApp.openById(id); }
+    catch (e) { throw new Error('تعذّر فتح جدول البيانات المرتبط بالنظام. تأكد من رقم الجدول، وأن صاحبه شاركه مع حساب النظام بصلاحية «محرّر».'); }
+  } else {
+    try { BOOK_ = SpreadsheetApp.getActive(); } catch (e) { BOOK_ = null; }
+    if (!BOOK_) throw new Error('النظام غير مرتبط بجدول بيانات. أضف رقم جدول العميل في إعدادات المشروع باسم SHEET_ID.');
+  }
+  return BOOK_;
+}
 function SS_() {
-  const ss = SpreadsheetApp.getActive();
+  const ss = book_();
   return { getSheetByName: function (n) { return ss.getSheetByName(bname_(n)); }, insertSheet: function (n, i) { return i == null ? ss.insertSheet(bname_(n)) : ss.insertSheet(bname_(n), i); },
     getSheets: function () { return ss.getSheets(); }, deleteSheet: function (x) { return ss.deleteSheet(x); }, getUrl: function () { return ss.getUrl(); } };
 }
@@ -105,7 +121,7 @@ const DEFAULT_SETTINGS = {
   staff: {}
 };
 
-const APP_VERSION = '4.5';
+const APP_VERSION = '4.7';
 /* the accountant may change a day for this many days; older days become view-only */
 const ACC_EDIT_DAYS = 30;
 /* the visible per-day sheets are kept this many months (all data stays in the system permanently) */
@@ -137,7 +153,7 @@ function saveImg_(sheet, key, p, label) {
       ensureRows_(s, parts.length); s.getRange(1, 1, parts.length, 1).setNumberFormat('@').setValues(parts);
     }
     const v = d ? String(Date.now()) : '';
-    withBr_('', function () { const st = getSettings_(); st[key] = v; hiddenSheet_(SETTINGS).getRange(1, 1).setValue(JSON.stringify(st)); });
+    withBr_('', function () { const st = getSettings_(); st[key] = v; putSettings_(st); });
     bump_();
     return { v: v };
   } finally { lock.releaseLock(); }
@@ -150,6 +166,10 @@ function saveWm_(p) { return saveImg_(WMS, 'wmV', p, 'العلامة المائ�
 /* the picture used as watermark: the chosen one, or the company logo */
 function wmSrc_() { const st = getSettings_(); if (st.logoWm === false) return ''; return (st.wmV && wm_().data) || logo_().data || ''; }
 
+/* text that looks like a formula (= + - @) is stored as plain text, so a name or a note can never run inside the spreadsheet */
+function safe_(rows) {
+  return rows.map(function (r) { return r.map(function (v) { return (typeof v === 'string' && /^[=+\-@]/.test(v) && !/^[-+]?\d/.test(v)) ? "'" + v : v; }); });
+}
 function jsSum_(t) {
   let h = 0;
   for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) % 1000000007;
@@ -198,9 +218,9 @@ function doGet(e) {
 
 /* ---------- API ---------- */
 function api(token, action, p) {
-  p = p || {}; BR = ''; SUPER_ = null;
+  p = p || {}; BR = ''; SUPER_ = null; BOOK_ = null;
   try {
-    if (action === 'status') { const s0 = getSettings_(); return ok_({ hasUsers: users_().length > 0, logoV: s0.logoV || '', wmV: s0.wmV || '', logoWm: s0.logoWm !== false, wmLevel: s0.wmLevel == null ? 1 : s0.wmLevel, wmMode: s0.wmMode || 'cover' }); }
+    if (action === 'status') { const s0 = getSettings_(), none = users_().length === 0; return ok_({ hasUsers: !none, needCode: none && !!setupCode_(), logoV: s0.logoV || '', wmV: s0.wmV || '', logoWm: s0.logoWm !== false, wmLevel: s0.wmLevel == null ? 1 : s0.wmLevel, wmMode: s0.wmMode || 'cover' }); }
     if (action === 'logo') return ok_(logo_());
     if (action === 'wm') return ok_(wm_());
     if (action === 'setup') return ok_(setup_(p));
@@ -288,20 +308,28 @@ function users_() {
     return { row: i + 2, username: String(r[0]), name: String(r[1]), role: String(r[2]), salt: String(r[3]), hash: String(r[4]), active: r[5] === true || String(r[5]).toUpperCase() === 'TRUE', perms: String(r[6] || ''), branch: String(r[7] || '') };
   }).filter(function (x) { return x.username; });
 }
-function pub_(x) { return { username: x.username, name: x.name, role: x.role, roleName: ROLE_NAMES[x.role] || x.role, active: x.active, perms: perms_(x), branch: x.branch || '', admin: isTop_(x), allbr: isAdmin_(x), top: isSuper_(x), full: isAdmin_(x) && String(x.perms) === 'FULL' }; }
+function pub_(x) { return { username: x.username, name: x.name, role: x.role, roleName: isSuper_(x) ? 'مدير النظام' : (ROLE_NAMES[x.role] || x.role), active: x.active, perms: perms_(x), branch: x.branch || '', admin: isTop_(x), allbr: isAdmin_(x), top: isSuper_(x), full: isAdmin_(x) && String(x.perms) === 'FULL' }; }
 function checkUser_(n) { if (!/^[A-Za-z0-9_.\-؀-ۿ]{3,30}$/.test(n)) throw new Error('اسم المستخدم من 3 إلى 30 حرفاً بدون مسافات'); }
 function checkPw_(pw) { if (pw.length < 4) throw new Error('كلمة المرور 4 أحرف أو أرقام على الأقل'); }
 
+/* optional: a code the installer puts in the script property SETUP_CODE, so nobody who finds the link first can take the system manager's account */
+function setupCode_() { return String(PropertiesService.getScriptProperties().getProperty('SETUP_CODE') || '').trim(); }
 function setup_(p) {
   const lock = LockService.getScriptLock(); lock.waitLock(15000);
   try {
-    if (users_().length) throw new Error('تم إنشاء حساب المحاسب مسبقاً، سجّل الدخول');
+    if (users_().length) throw new Error('تم إنشاء حساب مدير النظام مسبقاً، سجّل الدخول');
+    const sc = setupCode_();
+    if (sc) {
+      const c = CacheService.getScriptCache(), n = Number(c.get('setupfail') || 0);
+      if (n >= 8) throw new Error('محاولات كثيرة، حاول بعد 10 دقائق');
+      if (norm_(p.code) !== norm_(sc)) { c.put('setupfail', String(n + 1), 600); throw new Error('رمز التفعيل غير صحيح'); }
+    }
     const un = norm_(p.username).toLowerCase(), pw = norm_(p.password);
     checkUser_(un); checkPw_(pw);
     const salt = Utilities.getUuid();
-    hiddenSheet_(USERS).appendRow([un, String(p.name || '').trim().slice(0, 60) || un, 'acc', salt, hash_(salt, pw), true, '', '*']);
+    hiddenSheet_(USERS).appendRow(safe_([[un, String(p.name || '').trim().slice(0, 60) || un, 'acc', salt, hash_(salt, pw), true, '', '*']])[0]);
     const store = String(p.store || '').trim().slice(0, 120), branch = String(p.branch || '').trim().slice(0, 120);
-    if (store || branch) { const st = getSettings_(); if (store) st.store = store; if (branch) st.branch = branch; hiddenSheet_(SETTINGS).getRange(1, 1).setValue(JSON.stringify(st)); }
+    if (store || branch) { const st = getSettings_(); if (store) st.store = store; if (branch) st.branch = branch; putSettings_(st); }
   } finally { lock.releaseLock(); }
   return login_(p);
 }
@@ -381,12 +409,12 @@ function saveUser_(me, p) {
       if (u) throw new Error('اسم المستخدم مستخدم من قبل');
       checkPw_(pw);
       const salt = Utilities.getUuid();
-      s.appendRow([un, name, role, salt, hash_(salt, pw), active, role === 'acc' ? fullIn_(me, null, p, role) : permsIn_(role, p.perms), branchIn_(role, p.branch)]);
+      s.appendRow(safe_([[un, name, role, salt, hash_(salt, pw), active, role === 'acc' ? fullIn_(me, null, p, role) : permsIn_(role, p.perms), branchIn_(role, p.branch)]])[0]);
     } else {
       if (!u) throw new Error('المستخدم غير موجود');
       if (isSuper_(u) && !isSuper_(me)) throw new Error('حساب مدير النظام يعدّله صاحبه فقط');
       if (u.username === me.username && (role !== 'acc' || !active || branchIn_(role, p.branch) !== '*')) throw new Error('لا يمكنك تغيير صلاحية حسابك الحالي أو إيقافه');
-      s.getRange(u.row, 2, 1, 2).setValues([[name, role]]);
+      s.getRange(u.row, 2, 1, 2).setValues(safe_([[name, role]]));
       s.getRange(u.row, 6, 1, 3).setValues([[active, role === 'acc' ? fullIn_(me, u, p, role) : permsIn_(role, p.perms), branchIn_(role, p.branch)]]);
       if (pw) { checkPw_(pw); const salt = Utilities.getUuid(); s.getRange(u.row, 4, 1, 2).setValues([[salt, hash_(salt, pw)]]); }
     }
@@ -424,8 +452,24 @@ function deleteUser_(me, p) {
 }
 
 /* ---------- settings ---------- */
+/* settings live as JSON across the first row of the settings sheet (a cell holds at most 50,000 characters,
+   and staff schedules grow every month); older systems kept it all in A1 and are read the same way */
+const SET_CHUNK = 40000, SET_CELLS = 12;
+function settingsText_() {
+  const s = hiddenSheet_(SETTINGS), w = Math.min(SET_CELLS, Math.max(1, s.getLastColumn()));
+  return s.getRange(1, 1, 1, w).getValues()[0].map(function (x) { return String(x == null ? '' : x); }).join('');
+}
+function putSettings_(o) {
+  const t = JSON.stringify(o), parts = [];
+  for (let i = 0; i < t.length; i += SET_CHUNK) parts.push(t.slice(i, i + SET_CHUNK));
+  if (parts.length > SET_CELLS) throw new Error('بيانات الإعدادات أكبر من المسموح، احذف الموظفين القدامى من بيانات الموظفين');
+  while (parts.length < SET_CELLS) parts.push('');
+  const s = hiddenSheet_(SETTINGS);
+  if (s.getMaxColumns() < SET_CELLS) s.insertColumnsAfter(s.getMaxColumns(), SET_CELLS - s.getMaxColumns());
+  s.getRange(1, 1, 1, SET_CELLS).setNumberFormat('@').setValues([parts]);
+}
 function getSettings_() {
-  const v = hiddenSheet_(SETTINGS).getRange(1, 1).getValue();
+  const v = settingsText_();
   let o = {}; try { o = v ? JSON.parse(v) : {}; } catch (e) { }
   if (o.signB === 'توقيع مراقب الكاشيرات') o.signB = 'توقيع مسؤول الكاشيرات';
   if (!o.sup12) { o.supHours = 12; }
@@ -440,15 +484,15 @@ function getSettings_() {
 }
 /* a branch keeps its own settings; the company name, logo, watermark and branch list live with the first branch */
 function writeSettings_(st) {
-  if (!BR) { hiddenSheet_(SETTINGS).getRange(1, 1).setValue(JSON.stringify(st)); return; }
+  if (!BR) { putSettings_(st); return; }
   const own = Object.assign({}, st); COMPANY_KEYS.forEach(function (k) { delete own[k]; });
-  hiddenSheet_(SETTINGS).getRange(1, 1).setValue(JSON.stringify(own));
+  putSettings_(own);
   const id = BR;
   withBr_('', function () {
     const m = getSettings_();
     COMPANY_KEYS.forEach(function (k) { if (k !== 'branches' && st[k] !== undefined) m[k] = st[k]; });
     m.branches = (m.branches || []).map(function (b) { return b.id === id && st.branch ? { id: b.id, name: String(st.branch).slice(0, 60) } : b; });
-    hiddenSheet_(SETTINGS).getRange(1, 1).setValue(JSON.stringify(m));
+    putSettings_(m);
   });
 }
 function saveSettings_(p) {
@@ -522,6 +566,17 @@ function saveSettings_(p) {
     const cur = {};
     FX.forEach(function (x) { const c = (p.fx.cur || {})[x[0]] || {}, r = Math.round((Number(c.rate) || 0) * 10000) / 10000; cur[x[0]] = { on: !!c.on && r > 0, rate: r > 0 && r < 1000 ? r : x[2] }; });
     s.fx = { on: !!p.fx.on, mode: p.fx.mode === 'track' ? 'track' : 'convert', cur: cur };
+  }
+  if (p.bankFee && typeof p.bankFee === 'object') {
+    const iso = /^\d{4}-\d{2}-\d{2}$/, plans = [], seenFrom = {};
+    (Array.isArray(p.bankFee.plans) ? p.bankFee.plans : []).slice(-24).forEach(function (x) {
+      if (!x || !iso.test(String(x.from || '')) || seenFrom[x.from]) return; seenFrom[x.from] = 1;
+      const rates = {};
+      NETS.forEach(function (n) { const v = Number((x.rates || {})[n[0]]); if (isFinite(v) && v >= 0 && v <= 20) rates[n[0]] = Math.round(v * 1000) / 1000; });
+      plans.push({ from: x.from, rates: rates });
+    });
+    plans.sort(function (a, b) { return a.from < b.from ? -1 : 1; });
+    s.bankFee = { on: !!p.bankFee.on, vat: p.bankFee.vat !== false, plans: plans };
   }
   const seen = {};
   for (let i = 0; i < nBoxes_(s); i++) { const v = bn_(s, i); if (seen[v]) throw new Error('رقم الصندوق ' + v + ' مكرر، كل صندوق لازم يكون له رقم مختلف'); seen[v] = 1; }
@@ -864,7 +919,7 @@ function writeDaySheet_(doc, st) {
   out.push(pad(['آخر حفظ: ' + doc.savedBy + ' — ' + Utilities.formatDate(new Date(doc.savedAt), TZ, 'yyyy/MM/dd HH:mm')]));
   ensureRows_(sh, out.length);
   if (sh.getMaxColumns() < W) sh.insertColumnsAfter(sh.getMaxColumns(), W - sh.getMaxColumns());
-  sh.getRange(1, 1, out.length, W).setValues(out);
+  sh.getRange(1, 1, out.length, W).setValues(safe_(out));
   sh.getRange(1, 1, 2, 1).setFontWeight('bold');
   sh.getRange(1, 1).setFontSize(13);
   sh.getRange(4, 1, 1, W).setFontWeight('bold').setBackground('#1d3a5f').setFontColor('#ffffff').setWrap(true);
@@ -916,7 +971,7 @@ function appendLog_(out) {
   if (!out.length) return;
   const s = logSheet_(), start = s.getLastRow() + 1;
   ensureRows_(s, start + out.length - 1);
-  s.getRange(start, 1, out.length, out[0].length).setValues(out);
+  s.getRange(start, 1, out.length, out[0].length).setValues(safe_(out));
   s.getRange(start, 6, out.length, 12).setNumberFormat('#,##0.00');
 }
 function writeLog_(doc) {
@@ -1027,8 +1082,8 @@ function logSent_(st, date, i, b, contact, diff, by, tk, ch) {
   ensureRows_(s, nr);
   if (s.getMaxColumns() < 14) s.insertColumnsAfter(s.getMaxColumns(), 14 - s.getMaxColumns());
   if (!s.getRange(1, 14).getValue()) s.getRange(1, 11, 1, 4).setValues([['رمز الإشعار', 'طريقة الإرسال', 'أكدت الاطلاع', 'فتحت الإشعار']]).setFontWeight('bold').setBackground('#1d3a5f').setFontColor('#ffffff');
-  s.getRange(nr, 1, 1, 14).setValues([[date, dayName_(date), bn_(st, i), b.cashier || '', contact, diff, by,
-    Utilities.formatDate(now, TZ, 'yyyy/MM/dd HH:mm:ss'), i, now.toISOString(), tk, ch, '', '']]);
+  s.getRange(nr, 1, 1, 14).setValues(safe_([[date, dayName_(date), bn_(st, i), b.cashier || '', contact, diff, by,
+    Utilities.formatDate(now, TZ, 'yyyy/MM/dd HH:mm:ss'), i, now.toISOString(), tk, ch, '', '']]));
   bump_();
   } finally { lock.releaseLock(); }
 }
@@ -1258,7 +1313,7 @@ function appendAudit_(rows) {
   }
   const at = Utilities.formatDate(new Date(), TZ, 'yyyy/MM/dd HH:mm:ss'), start = s.getLastRow() + 1;
   ensureRows_(s, start + rows.length - 1);
-  s.getRange(start, 1, rows.length, 6).setValues(rows.map(function (r) { return r.concat([at]); }));
+  s.getRange(start, 1, rows.length, 6).setValues(safe_(rows.map(function (r) { return r.concat([at]); })));
 }
 function cleanupDaySheets_() {
   const c = CacheService.getScriptCache(), t = today_(), key = 'clean_' + t;
@@ -1373,7 +1428,7 @@ function cbMeta_(m) {
 }
 function cbMetaPut_(o) {
   const s = cbmSheet_(), vals = [[o.month, String(Math.round(o.opening * 100) / 100), o.src || '', o.carried ? '1' : '', o.carriedAt || '', o.by || '']];
-  if (o.row) s.getRange(o.row, 1, 1, 6).setValues(vals); else { const r = s.getLastRow() + 1; ensureRows_(s, r); s.getRange(r, 1, 1, 6).setValues(vals); o.row = r; }
+  if (o.row) s.getRange(o.row, 1, 1, 6).setValues(safe_(vals)); else { const r = s.getLastRow() + 1; ensureRows_(s, r); s.getRange(r, 1, 1, 6).setValues(safe_(vals)); o.row = r; }
 }
 function cbEntries_(m) {
   const s = cbSheet_(), n = s.getLastRow(); if (n < 2) return [];
@@ -1418,11 +1473,11 @@ function cbSave_(u, p) {
     const id = String(p.id || '');
     if (id) {
       const e = cbEntries_(m).filter(function (x) { return x.id === id; })[0]; if (!e) throw new Error('الحركة غير موجودة');
-      s.getRange(e.row, 3, 1, 6).setValues([[kind, date, desc, String(amount), who, at]]);
+      s.getRange(e.row, 3, 1, 6).setValues(safe_([[kind, date, desc, String(amount), who, at]]));
       appendAudit_([[date, 'الصندوق', '', 'تعديل ' + (e.kind === 'out' ? 'مخرج' : 'مدخل') + ': ' + e.desc + ' ' + e.amount + ' ← ' + desc + ' ' + amount, who]]);
     } else {
       const r = s.getLastRow() + 1; ensureRows_(s, r);
-      s.getRange(r, 1, 1, 8).setValues([[Utilities.getUuid().slice(0, 12), m, kind, date, desc, String(amount), who, at]]);
+      s.getRange(r, 1, 1, 8).setValues(safe_([[Utilities.getUuid().slice(0, 12), m, kind, date, desc, String(amount), who, at]]));
     }
     bump_();
   } finally { lock.releaseLock(); }
@@ -1498,7 +1553,7 @@ function saveBranch_(u, p) {
         list.push({ id: 'f' + n, name: name });
       }
       if ([m.branch].concat(list.map(function (b) { return b.name; })).filter(function (x) { return x === name; }).length > 1) throw new Error('يوجد فرع بنفس الاسم');
-      m.branches = list; hiddenSheet_(SETTINGS).getRange(1, 1).setValue(JSON.stringify(m));
+      m.branches = list; putSettings_(m);
     });
     if (p.id && p.id !== 'main') withBr_(p.id, function () { const st = getSettings_(); st.branch = name; writeSettings_(st); });
     bumpUv_(); bump_();
@@ -1511,10 +1566,10 @@ function deleteBranch_(u, p) {
   const lock = LockService.getScriptLock(); lock.waitLock(15000);
   try {
     if (branchIds_().indexOf(id) < 0) throw new Error('الفرع غير موجود');
-    const used = withBr_(id, function () { const s = SpreadsheetApp.getActive().getSheetByName(bname_(DATA)); return s && s.getLastRow() > 1; });
+    const used = withBr_(id, function () { const s = book_().getSheetByName(bname_(DATA)); return s && s.getLastRow() > 1; });
     if (used) throw new Error('الفرع عليه بيانات محفوظة، ما يمكن حذفه');
     if (users_().some(function (x) { return x.branch === id; })) throw new Error('فيه مستخدمين مرتبطين بهذا الفرع، انقلهم أو احذفهم أولاً');
-    withBr_('', function () { const m = getSettings_(); m.branches = (m.branches || []).filter(function (b) { return b.id !== id; }); hiddenSheet_(SETTINGS).getRange(1, 1).setValue(JSON.stringify(m)); });
+    withBr_('', function () { const m = getSettings_(); m.branches = (m.branches || []).filter(function (b) { return b.id !== id; }); putSettings_(m); });
     bumpUv_(); bump_();
   } finally { lock.releaseLock(); }
   return branchIds_().map(function (x) { return { id: x, name: branchName_(x) }; });
@@ -1581,10 +1636,10 @@ function ptPerson_(u, p) {
     if (all.some(function (r) { return r[1] === name && r[0] !== id; })) throw new Error('يوجد صاحب عهدة بنفس الاسم');
     if (id) {
       const r = all.filter(function (x) { return x[0] === id; })[0]; if (!r) throw new Error('صاحب العهدة غير موجود');
-      sh.getRange(r.row, 2, 1, 5).setValues([[name, String(amount), p.active === false ? '0' : '1', who, ptAt_()]]);
+      sh.getRange(r.row, 2, 1, 5).setValues(safe_([[name, String(amount), p.active === false ? '0' : '1', who, ptAt_()]]));
     } else {
       const nid = 'p' + Utilities.getUuid().slice(0, 8), row = sh.getLastRow() + 1; ensureRows_(sh, row);
-      sh.getRange(row, 1, 1, 6).setValues([[nid, name, String(amount), '1', who, ptAt_()]]);
+      sh.getRange(row, 1, 1, 6).setValues(safe_([[nid, name, String(amount), '1', who, ptAt_()]]));
       if (amount > 0) ptAdd_(nid, 'fund', today_(), 'صرف العهدة', '', amount, '', who);
       appendAudit_([[today_(), 'العهدة', name, 'صاحب عهدة جديد بمبلغ ' + amount, who]]);
     }
@@ -1595,7 +1650,7 @@ function ptPerson_(u, p) {
 function ptAdd_(pid, kind, date, desc, ref, amount, settle, who) {
   const sh = ptxSheet_(), row = sh.getLastRow() + 1; ensureRows_(sh, row);
   const id = 't' + Utilities.getUuid().replace(/-/g, '').slice(0, 10);
-  sh.getRange(row, 1, 1, 10).setValues([[id, pid, kind, date, desc, ref, String(r2s_(amount)), settle || '', who, ptAt_()]]);
+  sh.getRange(row, 1, 1, 10).setValues(safe_([[id, pid, kind, date, desc, ref, String(r2s_(amount)), settle || '', who, ptAt_()]]));
   return id;
 }
 function ptTx_(u, p) {
@@ -1612,7 +1667,7 @@ function ptTx_(u, p) {
     if (id) {
       const sh = ptxSheet_(), r = ptRows_(sh, 10).filter(function (x) { return x[0] === id; })[0]; if (!r) throw new Error('الحركة غير موجودة');
       if (r[7]) throw new Error('هذه الحركة ضمن تصفية سابقة ومقفلة');
-      sh.getRange(r.row, 3, 1, 5).setValues([[kind, date, desc, ref, String(amount)]]); sh.getRange(r.row, 9, 1, 2).setValues([[who, ptAt_()]]);
+      sh.getRange(r.row, 3, 1, 5).setValues(safe_([[kind, date, desc, ref, String(amount)]])); sh.getRange(r.row, 9, 1, 2).setValues(safe_([[who, ptAt_()]]));
       appendAudit_([[date, 'العهدة', pr[1], 'تعديل حركة: ' + r[4] + ' ' + r[6] + ' ← ' + desc + ' ' + amount, who]]);
     } else ptAdd_(pr[0], kind, date, desc, ref, amount, '', who);
     bump_();
@@ -1647,7 +1702,7 @@ function ptSettle_(u, p) {
     if (refill) ptAdd_(pid, 'fund', today_(), 'استعاضة تصفية رقم ' + no, '', refill, sid, who);
     const bal = ptGet_().people.filter(function (x) { return x.id === pid; })[0].balance;
     const row = S.getLastRow() + 1; ensureRows_(S, row);
-    S.getRange(row, 1, 1, 11).setValues([[sid, pid, String(no), today_(), dates[0], dates[dates.length - 1], String(exp), String(refill), String(bal), who, ptAt_()]]);
+    S.getRange(row, 1, 1, 11).setValues(safe_([[sid, pid, String(no), today_(), dates[0], dates[dates.length - 1], String(exp), String(refill), String(bal), who, ptAt_()]]));
     appendAudit_([[today_(), 'العهدة', pr[1], 'تصفية رقم ' + no + ' بمبلغ ' + exp + (refill ? ' مع الاستعاضة' : ''), who]]);
     bump_();
   } finally { lock.releaseLock(); }
